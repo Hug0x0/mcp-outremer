@@ -120,6 +120,29 @@ function sourceByKey(key: string) {
   );
 }
 
+const TERRITORIES = [
+  { name: 'Guadeloupe', code: '971', type: 'department-region', data_gouv_query: 'Guadeloupe', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Guadeloupe' },
+  { name: 'Martinique', code: '972', type: 'department-region', data_gouv_query: 'Martinique', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Martinique' },
+  { name: 'Guyane', code: '973', type: 'department-region', data_gouv_query: 'Guyane', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Guyane' },
+  { name: 'La Réunion', code: '974', type: 'department-region', data_gouv_query: 'Réunion', portal: 'https://data.regionreunion.com/' },
+  { name: 'Mayotte', code: '976', type: 'department-region', data_gouv_query: 'Mayotte', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Mayotte' },
+  { name: 'Saint-Pierre-et-Miquelon', code: '975', type: 'collectivity', data_gouv_query: 'Saint-Pierre-et-Miquelon', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Saint-Pierre-et-Miquelon' },
+  { name: 'Saint-Barthélemy', code: '977', type: 'collectivity', data_gouv_query: 'Saint-Barthélemy', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Saint-Barthélemy' },
+  { name: 'Saint-Martin', code: '978', type: 'collectivity', data_gouv_query: 'Saint-Martin', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Saint-Martin' },
+  { name: 'Wallis-et-Futuna', code: '986', type: 'collectivity', data_gouv_query: 'Wallis Futuna', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Wallis+Futuna' },
+  { name: 'Polynésie française', code: '987', type: 'collectivity', data_gouv_query: 'Polynésie française', portal: 'https://www.data.gouv.fr/fr/datasets/?q=Polynésie+française' },
+  { name: 'Nouvelle-Calédonie', code: '988', type: 'collectivity', data_gouv_query: 'Nouvelle-Calédonie', portal: 'https://data.gouv.nc/' },
+] as const;
+
+function findTerritory(value: string) {
+  const normalized = value.toLowerCase();
+  return TERRITORIES.find((territory) =>
+    territory.code === normalized ||
+    territory.name.toLowerCase().includes(normalized) ||
+    territory.data_gouv_query.toLowerCase().includes(normalized)
+  );
+}
+
 const server = new McpServer({
   name: CONFIG.name,
   version: '0.1.0',
@@ -261,6 +284,103 @@ server.tool(
       ? 'These are lightweight reference hints, not a complete authoritative dataset.'
       : 'No local reference list is bundled yet. Use the source and dataset search tools.',
   })
+);
+
+server.tool(
+  'outremer_list_territories',
+  'List French overseas territories with INSEE department/collectivity codes and useful portal hints.',
+  {},
+  async () => jsonResult({
+    territories: TERRITORIES,
+    count: TERRITORIES.length,
+  })
+);
+
+server.tool(
+  'outremer_get_territory',
+  'Resolve one French overseas territory by name or code and return public-data search hints.',
+  {
+    territory: z.string().describe('Territory name or code, e.g. "974", "Réunion", "Mayotte", "988".'),
+  },
+  async ({ territory }) => {
+    const resolved = findTerritory(territory);
+    if (!resolved) {
+      return errorResult(`Unknown overseas territory: ${territory}`);
+    }
+    return jsonResult({
+      territory: resolved,
+      suggested_data_gouv_query: resolved.data_gouv_query,
+      geo_api_communes_url: ['971', '972', '973', '974', '976'].includes(resolved.code)
+        ? `https://geo.api.gouv.fr/departements/${resolved.code}/communes`
+        : undefined,
+    });
+  }
+);
+
+server.tool(
+  'outremer_list_communes',
+  'List communes for an overseas department using geo.api.gouv.fr. Supports 971, 972, 973, 974 and 976.',
+  {
+    department_code: z.enum(['971', '972', '973', '974', '976']).describe('Overseas department code.'),
+  },
+  async ({ department_code }) => {
+    try {
+      const url = `https://geo.api.gouv.fr/departements/${department_code}/communes?fields=nom,code,codesPostaux,population,centre&format=json`;
+      const communes = await fetchJson<Array<Record<string, unknown>>>(url);
+      return jsonResult({
+        department_code,
+        count: communes.length,
+        communes: communes.map((commune) => ({
+          name: commune.nom,
+          code: commune.code,
+          postal_codes: commune.codesPostaux,
+          population: commune.population,
+          center: commune.centre,
+        })),
+      });
+    } catch (error) {
+      return errorResult(error instanceof Error ? error.message : 'Failed to list overseas communes');
+    }
+  }
+);
+
+server.tool(
+  'outremer_search_territory_datasets',
+  'Search data.gouv.fr for datasets related to one French overseas territory.',
+  {
+    territory: z.string().describe('Territory name or code.'),
+    topic: z.string().optional().describe('Optional topic added to the territory query, e.g. "transport", "risques", "éducation".'),
+    page_size: z.number().int().min(1).max(50).default(10).describe('Number of datasets to return.'),
+  },
+  async ({ territory, topic, page_size }) => {
+    const resolved = findTerritory(territory);
+    if (!resolved) {
+      return errorResult(`Unknown overseas territory: ${territory}`);
+    }
+    try {
+      const query = topic ? `${resolved.data_gouv_query} ${topic}` : resolved.data_gouv_query;
+      const url = new URL('https://www.data.gouv.fr/api/1/datasets/');
+      url.searchParams.set('q', query);
+      url.searchParams.set('page_size', String(page_size));
+      const data = await fetchJson<{ data?: Array<Record<string, unknown>>; total?: number }>(url.toString());
+      return jsonResult({
+        territory: resolved,
+        query,
+        total: data.total,
+        datasets: (data.data ?? []).map((dataset) => ({
+          id: dataset.id,
+          slug: dataset.slug,
+          title: dataset.title,
+          page: dataset.page,
+          organization: dataset.organization && typeof dataset.organization === 'object'
+            ? (dataset.organization as Record<string, unknown>).name
+            : undefined,
+        })),
+      });
+    } catch (error) {
+      return errorResult(error instanceof Error ? error.message : 'Failed to search territory datasets');
+    }
+  }
 );
 
 async function main(): Promise<void> {

@@ -14,6 +14,10 @@ French overseas territories data discovery across national portals and local ope
 - `outremer_fetch_source_excerpt`
 - `outremer_explain_scope`
 - `outremer_list_reference_items`
+- `outremer_list_territories`
+- `outremer_get_territory`
+- `outremer_list_communes`
+- `outremer_search_territory_datasets`
 
 ## Install
 
