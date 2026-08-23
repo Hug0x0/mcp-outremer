@@ -383,6 +383,57 @@ server.tool(
   }
 );
 
+server.tool(
+  'outremer_compare_departments',
+  'Compare commune counts, total population, and data.gouv.fr search hints for overseas departments supported by geo.api.gouv.fr.',
+  {
+    department_codes: z
+      .array(z.enum(['971', '972', '973', '974', '976']))
+      .default(['971', '972', '973', '974', '976'])
+      .describe('Overseas department codes to compare.'),
+  },
+  async ({ department_codes }) => {
+    try {
+      const uniqueCodes = [...new Set(department_codes)];
+      const comparisons = await Promise.all(uniqueCodes.map(async (code) => {
+        const territory = TERRITORIES.find((item) => item.code === code);
+        const url = `https://geo.api.gouv.fr/departements/${code}/communes?fields=nom,code,codesPostaux,population,centre&format=json`;
+        const communes = await fetchJson<Array<Record<string, unknown>>>(url);
+        const totalPopulation = communes.reduce((sum, commune) => {
+          const population = typeof commune.population === 'number' ? commune.population : 0;
+          return sum + population;
+        }, 0);
+        return {
+          department_code: code,
+          territory_name: territory?.name,
+          type: territory?.type,
+          commune_count: communes.length,
+          total_population: totalPopulation,
+          largest_communes_by_population: communes
+            .slice()
+            .sort((a, b) => Number(b.population ?? 0) - Number(a.population ?? 0))
+            .slice(0, 5)
+            .map((commune) => ({
+              name: commune.nom,
+              code: commune.code,
+              population: commune.population,
+            })),
+          geo_api_source: url,
+          suggested_data_gouv_query: territory?.data_gouv_query,
+          portal: territory?.portal,
+        };
+      }));
+      return jsonResult({
+        compared_department_codes: uniqueCodes,
+        comparisons,
+        note: 'Population values come from geo.api.gouv.fr commune fields and should be checked against INSEE for formal use.',
+      });
+    } catch (error) {
+      return errorResult(error instanceof Error ? error.message : 'Failed to compare overseas departments');
+    }
+  }
+);
+
 async function main(): Promise<void> {
   await server.connect(new StdioServerTransport());
   console.error(`${CONFIG.name} running on stdio`);
